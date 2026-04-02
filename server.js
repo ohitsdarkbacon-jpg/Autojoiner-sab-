@@ -9,16 +9,16 @@ app.use(express.json());
 
 const ACTIVE_TOKENS = new Map(); // token → expiresAt
 
-console.log('WebSocket server started!');
+console.log('Trulys WebSocket Server Starting...');
 
-// ==================== TEMPORARY TOKEN ENDPOINT ====================
+// ==================== GET TEMPORARY TOKEN (60 seconds) ====================
 app.post('/gettoken', (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = Date.now() + 60 * 1000; // 60 seconds
 
     ACTIVE_TOKENS.set(token, expiresAt);
 
-    console.log(`[${new Date().toISOString()}] Issued temporary token`);
+    console.log(`[${new Date().toISOString()}] New temporary token issued`);
 
     res.json({
         token: token,
@@ -33,9 +33,8 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `wss://${req.headers.host}`);
     const token = url.searchParams.get('token');
 
-    // Token validation
     if (!token || !ACTIVE_TOKENS.has(token)) {
-        console.log("❌ Invalid or missing token - connection rejected");
+        console.log("❌ Invalid token - rejected");
         ws.close(1008, "Invalid token");
         return;
     }
@@ -43,20 +42,20 @@ wss.on('connection', (ws, req) => {
     const expiresAt = ACTIVE_TOKENS.get(token);
     if (Date.now() > expiresAt) {
         ACTIVE_TOKENS.delete(token);
-        console.log("❌ Token expired - connection rejected");
+        console.log("❌ Token expired - rejected");
         ws.close(1008, "Token expired");
         return;
     }
 
-    // Token is single-use
+    // Single-use token
     ACTIVE_TOKENS.delete(token);
 
-    console.log("✅ Valid temporary connection accepted");
+    console.log("✅ Valid connection accepted");
 
     ws.on('message', (message) => {
         console.log('Received:', message.toString());
 
-        // Broadcast to all other clients
+        // Broadcast to all clients
         wss.clients.forEach((client) => {
             if (client.readyState === WebSocket.OPEN) {
                 client.send(message);
@@ -69,17 +68,17 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// Cleanup expired tokens every 30 seconds
+// Cleanup expired tokens
 setInterval(() => {
     const now = Date.now();
     for (const [token, exp] of ACTIVE_TOKENS) {
-        if (now > exp) {
-            ACTIVE_TOKENS.delete(token);
-        }
+        if (now > exp) ACTIVE_TOKENS.delete(token);
     }
 }, 30000);
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-    console.log(`HTTP Server running on port ${PORT} (for /gettoken)`);
+    console.log(`HTTP Server running on port ${PORT} (/gettoken)`);
 });
+
+console.log(`WebSocket Server running on port ${PORT}`);
