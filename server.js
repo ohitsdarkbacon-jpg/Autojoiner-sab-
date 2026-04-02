@@ -76,7 +76,7 @@ setInterval(() => {
     }
 }, 30000);
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8081;
 app.listen(PORT, () => {
     console.log(`HTTP Server running on port ${PORT} (/gettoken)`);
 });
