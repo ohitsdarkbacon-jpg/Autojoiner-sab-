@@ -12,19 +12,21 @@ const ACTIVE_TOKENS = new Map();
 
 console.log('🚀 Server starting...');
 
+// ================= TOKEN =================
 app.post('/gettoken', (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 180 * 1000; // ✅ 3 minutes
+    const expiresAt = Date.now() + 60 * 1000; // ✅ 60 seconds
 
     ACTIVE_TOKENS.set(token, expiresAt);
 
     res.json({
         success: true,
         token,
-        expiresIn: 180
+        expiresIn: 60
     });
 });
 
+// ================= HEALTH =================
 app.get('/health', (req, res) => {
     res.json({
         status: 'running',
@@ -35,11 +37,12 @@ app.get('/health', (req, res) => {
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
 
+// ================= WS SERVER =================
 const wss = new WebSocket.Server({ noServer: true });
 
--- UPGRADE HANDLER (CRITICAL FIX)
+// ✅ UPGRADE HANDLER
 server.on('upgrade', (req, socket, head) => {
-    console.log('[UPGRADE] Incoming');
+    console.log('[UPGRADE] Incoming request');
 
     try {
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -51,29 +54,37 @@ server.on('upgrade', (req, socket, head) => {
     }
 });
 
+// ================= CONNECTION =================
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
 
     console.log('[WS] Connection attempt');
 
+    // Hard kill if stuck
     const timeout = setTimeout(() => {
-        console.log('[WS] Timeout kill');
+        console.log('[WS] ❌ Timeout kill');
         ws.terminate();
     }, 10000);
 
+    // ❌ INVALID TOKEN
     if (!token || !ACTIVE_TOKENS.has(token)) {
-        ws.close();
+        console.log('[WS] ❌ Invalid token');
+        ws.close(1008, "Invalid token");
         return;
     }
 
     const exp = ACTIVE_TOKENS.get(token);
+
+    // ❌ EXPIRED TOKEN
     if (Date.now() > exp) {
         ACTIVE_TOKENS.delete(token);
-        ws.close();
+        console.log('[WS] ❌ Token expired');
+        ws.close(1008, "Expired token");
         return;
     }
 
+    // ✅ VALID → allow session forever
     clearTimeout(timeout);
     ACTIVE_TOKENS.delete(token);
 
@@ -103,14 +114,17 @@ wss.on('connection', (ws, req) => {
     });
 });
 
+// ================= START =================
 server.listen(PORT, () => {
     console.log(`🌐 Running on port ${PORT}`);
 });
 
--- CLEANUP
+// ================= CLEANUP =================
 setInterval(() => {
     const now = Date.now();
     for (const [token, exp] of ACTIVE_TOKENS.entries()) {
-        if (now > exp) ACTIVE_TOKENS.delete(token);
+        if (now > exp) {
+            ACTIVE_TOKENS.delete(token);
+        }
     }
 }, 30000);
