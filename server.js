@@ -1,115 +1,88 @@
 const WebSocket = require('ws');
 const express = require('express');
-const cors = require('cors');
 const crypto = require('crypto');
 
 const app = express();
-app.set('trust proxy', true);
+const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: "*" }));
-app.use(express.json());
+// Token storage (in-memory for this example)
+const validTokens = new Set();
 
-const ACTIVE_TOKENS = new Map();
+// Generate tokens valid for entire session
+function generateToken() {
+  const token = crypto.randomBytes(32).toString('hex');
+  validTokens.add(token);
+  return token;
+}
 
-// ==================== TOKEN ENDPOINT ====================
+// HTTP endpoint to get initial token
 app.post('/gettoken', (req, res) => {
-    const token = crypto.randomBytes(32).toString('hex');
-    ACTIVE_TOKENS.set(token, Date.now() + 60 * 1000); // 60-second token expiration
-
-    console.log(`[${new Date().toISOString()}] New 60s token issued`);
-    res.json({ success: true, token: token, expiresIn: 60 });
+  const token = generateToken();
+  res.json({ token });
+  console.log(`[Auth] Issued new session token: ${token}`);
 });
 
-app.get('/health', (req, res) => res.json({ status: 'running' }));
-
-// ==================== WEBSOCKET SERVER ====================
-const wss = new WebSocket.Server({
-    noServer: true,
-    pingInterval: 15000, // Send ping every 15 seconds
-    pingTimeout: 40000, // Timeout after 40 seconds
-    clientTracking: true
-});
+// WebSocket server
+const wss = new WebSocket.Server({ noServer: true });
 
 wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const token = url.searchParams.get('token');
+  const token = new URL(req.url, `ws://${req.headers.host}`).searchParams.get('token');
+  
+  if (!validTokens.has(token)) {
+    console.log(`[Auth] Rejected invalid token: ${token}`);
+    return ws.close(4001, 'Invalid token');
+  }
 
-    // Token validation
-    if (!token || !ACTIVE_TOKENS.has(token)) {
-        ws.close(1008, "Invalid token");
-        return;
+  console.log(`[WS] Client connected with valid token (${token.substring(0, 6)}...)`);
+
+  // Heartbeat
+  let isAlive = true;
+  const heartbeatInterval = setInterval(() => {
+    if (!isAlive) return ws.terminate();
+    isAlive = false;
+    ws.ping();
+  }, 30000);
+
+  ws.on('pong', () => {
+    isAlive = true;
+    console.log(`[WS] Received pong from ${token.substring(0, 6)}...`);
+  });
+
+  // Message handling
+  ws.on('message', (message) => {
+    if (message === 'ping') {
+      ws.send('pong');
+      return;
     }
-    if (Date.now() > ACTIVE_TOKENS.get(token)) {
-        ws.close(1008, "Token expired");
-        return;
+
+    try {
+      const data = JSON.parse(message);
+      console.log(`[WS] Received data:`, data);
+      // Broadcast to other clients if needed
+      wss.clients.forEach(client => {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    } catch (e) {
+      console.error('Message parse error:', e);
     }
+  });
 
-    ACTIVE_TOKENS.delete(token);
-    console.log(`✅ Client connected | Total: ${wss.clients.size}`);
-
-    // Mark connection as alive
-    ws.isAlive = true;
-
-    // Handle pong responses
-    ws.on('pong', () => {
-        ws.isAlive = true;
-    });
-
-    // Send welcome message
-    ws.send(JSON.stringify({ type: "echo", message: "Successfully connected to Trulys Hub" }));
-
-    // Handle incoming messages
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message.toString());
-            console.log(`📨 Received from client:`, data);
-
-            // Broadcast to all other clients
-            wss.clients.forEach(client => {
-                if (client !== ws && client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify(data));
-                }
-            });
-
-            // Echo back to sender
-            ws.send(JSON.stringify({ type: "echo", status: "received", original: data }));
-        } catch (e) {
-            console.log("📨 Raw message:", message.toString());
-        }
-    });
-
-    // Handle connection close
-    ws.on('close', () => {
-        console.log(`Client disconnected | Remaining: ${wss.clients.size}`);
-    });
-
-    // Handle errors
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-    });
+  ws.on('close', () => {
+    clearInterval(heartbeatInterval);
+    console.log(`[WS] Client disconnected (${token.substring(0, 6)}...)`);
+  });
 });
 
-// Health check for connections
-setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (!ws.isAlive) {
-            console.log('Terminating dead connection');
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping(null, false, true); // Send ping
-    });
-}, 30000); // Check every 30 seconds
-
-// ==================== HTTP SERVER SETUP ====================
-const server = app.listen(process.env.PORT || 8080, () => {
-    console.log(`🚀 Server running on port ${process.env.PORT || 8080}`);
+// HTTP server
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
-server.on('upgrade', (request, socket, head) => {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
-    });
+// WebSocket upgrade handler
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
 });
-
-console.log("✅ Trulys Backend Ready - Message sending/receiving enabled");
