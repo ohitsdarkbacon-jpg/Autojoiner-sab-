@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const http = require('http');
+const { URL } = require('url');
 
 const app = express();
 app.use(cors());
@@ -16,12 +17,12 @@ console.log('🚀 Server starting...');
 app.post('/gettoken', (req, res) => {
     try {
         const token = crypto.randomBytes(32).toString('hex');
-        const expiresAt = Date.now() + 60 * 1000; // 60 seconds
+        const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
         ACTIVE_TOKENS.set(token, expiresAt);
         res.json({
             success: true,
             token,
-            expiresIn: 60
+            expiresIn: 300 // 5 minutes
         });
     } catch (err) {
         console.error('[TOKEN ERROR]', err);
@@ -29,6 +30,7 @@ app.post('/gettoken', (req, res) => {
     }
 });
 
+// Health check
 app.get('/health', (req, res) => {
     res.json({
         status: 'running',
@@ -58,8 +60,8 @@ server.on('upgrade', (req, socket, head) => {
 
 // ====== WS CONNECTION LOGIC ======
 wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const token = url.searchParams.get('token');
+    const urlObj = new URL(req.url, 'http://dummy'); // base ignored
+    const token = urlObj.searchParams.get('token');
 
     if (!token || !ACTIVE_TOKENS.has(token)) {
         ws.close(1008, 'Invalid token');
@@ -73,9 +75,7 @@ wss.on('connection', (ws, req) => {
         return;
     }
 
-    // ✅ Token is valid — remove it so it can’t be reused
-    ACTIVE_TOKENS.delete(token);
-
+    // ✅ Token is valid — keep it in ACTIVE_TOKENS until it expires
     const clientId = crypto.randomBytes(4).toString('hex');
     console.log(`✅ Client ${clientId} connected (Total: ${wss.clients.size})`);
 
