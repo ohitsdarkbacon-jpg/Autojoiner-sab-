@@ -15,7 +15,7 @@ console.log('🚀 Server starting...');
 // ================= TOKEN =================
 app.post('/gettoken', (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 60 * 1000; // ✅ 60 seconds
+    const expiresAt = Date.now() + 60 * 1000;
 
     ACTIVE_TOKENS.set(token, expiresAt);
 
@@ -61,13 +61,11 @@ wss.on('connection', (ws, req) => {
 
     console.log('[WS] Connection attempt');
 
-    // Hard kill if stuck
     const timeout = setTimeout(() => {
         console.log('[WS] ❌ Timeout kill');
         ws.terminate();
     }, 10000);
 
-    // ❌ INVALID TOKEN
     if (!token || !ACTIVE_TOKENS.has(token)) {
         console.log('[WS] ❌ Invalid token');
         ws.close(1008, "Invalid token");
@@ -76,7 +74,6 @@ wss.on('connection', (ws, req) => {
 
     const exp = ACTIVE_TOKENS.get(token);
 
-    // ❌ EXPIRED TOKEN
     if (Date.now() > exp) {
         ACTIVE_TOKENS.delete(token);
         console.log('[WS] ❌ Token expired');
@@ -84,7 +81,6 @@ wss.on('connection', (ws, req) => {
         return;
     }
 
-    // ✅ VALID → allow session forever
     clearTimeout(timeout);
     ACTIVE_TOKENS.delete(token);
 
