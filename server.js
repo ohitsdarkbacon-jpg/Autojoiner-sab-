@@ -9,45 +9,42 @@ app.use(cors());
 app.use(express.json());
 
 const ACTIVE_TOKENS = new Map();
-const CLIENTS = new Map(); // track session clients
 
-console.log('🚀 Trulys WebSocket Server Starting...');
+console.log('🚀 Server starting...');
 
-// ==================== TOKEN ENDPOINT ====================
+// ====== TOKEN GENERATION ======
 app.post('/gettoken', (req, res) => {
     try {
         const token = crypto.randomBytes(32).toString('hex');
         const expiresAt = Date.now() + 60 * 1000; // 60 seconds
         ACTIVE_TOKENS.set(token, expiresAt);
-
         res.json({
             success: true,
             token,
             expiresIn: 60
         });
-        console.log(`[TOKEN] Issued token ${token} (expires in 60s)`);
-    } catch (error) {
-        console.error('Token generation error:', error);
+    } catch (err) {
+        console.error('[TOKEN ERROR]', err);
         res.status(500).json({ success: false, error: 'Failed to generate token' });
     }
 });
 
-// ==================== HEALTH CHECK ====================
 app.get('/health', (req, res) => {
     res.json({
         status: 'running',
         activeTokens: ACTIVE_TOKENS.size,
-        connectedClients: CLIENTS.size,
+        connectedClients: wss ? wss.clients.size : 0,
         timestamp: new Date().toISOString()
     });
 });
 
-// ==================== HTTP + WS SERVER ====================
+// ====== HTTP & WS SERVER ======
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
+
 const wss = new WebSocket.Server({ noServer: true });
 
-// ==================== WS UPGRADE HANDLER ====================
+// ====== HANDLE WS UPGRADE ======
 server.on('upgrade', (req, socket, head) => {
     try {
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -59,16 +56,12 @@ server.on('upgrade', (req, socket, head) => {
     }
 });
 
-// ==================== WS CONNECTION ====================
+// ====== WS CONNECTION LOGIC ======
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
 
-    console.log(`[WS] Connection attempt from ${req.socket.remoteAddress}`);
-
-    // Check token validity
     if (!token || !ACTIVE_TOKENS.has(token)) {
-        console.log(`[WS] ❌ Invalid or missing token`);
         ws.close(1008, 'Invalid token');
         return;
     }
@@ -76,17 +69,15 @@ wss.on('connection', (ws, req) => {
     const expiresAt = ACTIVE_TOKENS.get(token);
     if (Date.now() > expiresAt) {
         ACTIVE_TOKENS.delete(token);
-        console.log(`[WS] ❌ Token expired`);
         ws.close(1008, 'Token expired');
         return;
     }
 
-    // Token valid, delete it — session is now active
+    // ✅ Token is valid — remove it so it can’t be reused
     ACTIVE_TOKENS.delete(token);
-    const clientId = crypto.randomBytes(4).toString('hex');
-    CLIENTS.set(clientId, ws);
 
-    console.log(`✅ Client ${clientId} connected (Total: ${CLIENTS.size})`);
+    const clientId = crypto.randomBytes(4).toString('hex');
+    console.log(`✅ Client ${clientId} connected (Total: ${wss.clients.size})`);
 
     ws.send(JSON.stringify({
         type: 'welcome',
@@ -95,51 +86,35 @@ wss.on('connection', (ws, req) => {
         timestamp: new Date().toISOString()
     }));
 
-    // ==================== MESSAGE HANDLING ====================
     ws.on('message', (msg) => {
         let data;
         try {
             data = JSON.parse(msg.toString());
         } catch {
-            data = { type: 'text', content: msg.toString() };
+            return;
         }
 
+        // ping/pong keep-alive
         if (data.type === 'ping') {
             ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
         }
-
-        // Broadcast to all other clients
-        CLIENTS.forEach((clientWs, id) => {
-            if (id !== clientId && clientWs.readyState === WebSocket.OPEN) {
-                clientWs.send(JSON.stringify(data));
-            }
-        });
     });
 
     ws.on('close', () => {
-        CLIENTS.delete(clientId);
-        console.log(`❌ Client ${clientId} disconnected (Total: ${CLIENTS.size})`);
+        console.log(`❌ Client ${clientId} disconnected`);
     });
 });
 
-// ==================== EXPIRED TOKEN CLEANUP ====================
+// ====== CLEANUP EXPIRED TOKENS ======
 setInterval(() => {
     const now = Date.now();
-    let expiredCount = 0;
     for (const [token, exp] of ACTIVE_TOKENS.entries()) {
-        if (now > exp) {
-            ACTIVE_TOKENS.delete(token);
-            expiredCount++;
-        }
-    }
-    if (expiredCount > 0) {
-        console.log(`🧹 Cleaned up ${expiredCount} expired tokens`);
+        if (now > exp) ACTIVE_TOKENS.delete(token);
     }
 }, 30000);
 
-// ==================== START SERVER ====================
 server.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`   HTTP: http://localhost:${PORT}/gettoken`);
-    console.log(`   WS: ws://localhost:${PORT}?token=YOURTOKEN`);
+    console.log(`🌐 Server running on port ${PORT}`);
+    console.log(`   HTTP Token: http://localhost:${PORT}/gettoken`);
+    console.log(`   WS connect: ws://localhost:${PORT}?token=TOKEN`);
 });
