@@ -10,12 +10,12 @@ app.use(express.json());
 
 const ACTIVE_TOKENS = new Map();
 
-console.log('🚀 Server starting...');
+console.log('🚀 Trulys WebSocket Server Starting...');
 
-// ================= TOKEN =================
+// ==================== TOKEN ENDPOINT ====================
 app.post('/gettoken', (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 60 * 1000;
+    const expiresAt = Date.now() + 60 * 1000; // 60 seconds
 
     ACTIVE_TOKENS.set(token, expiresAt);
 
@@ -26,24 +26,21 @@ app.post('/gettoken', (req, res) => {
     });
 });
 
-// ================= HEALTH =================
 app.get('/health', (req, res) => {
     res.json({
         status: 'running',
-        tokens: ACTIVE_TOKENS.size
+        activeTokens: ACTIVE_TOKENS.size,
+        timestamp: new Date().toISOString()
     });
 });
 
+// ==================== HTTP + WS SETUP ====================
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
-
-// ================= WS SERVER =================
 const wss = new WebSocket.Server({ noServer: true });
 
-// ✅ UPGRADE HANDLER
+// Upgrade handler
 server.on('upgrade', (req, socket, head) => {
-    console.log('[UPGRADE] Incoming request');
-
     try {
         wss.handleUpgrade(req, socket, head, (ws) => {
             wss.emit('connection', ws, req);
@@ -54,17 +51,12 @@ server.on('upgrade', (req, socket, head) => {
     }
 });
 
-// ================= CONNECTION =================
+// ==================== WEBSOCKET CONNECTION ====================
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
 
-    console.log('[WS] Connection attempt');
-
-    const timeout = setTimeout(() => {
-        console.log('[WS] ❌ Timeout kill');
-        ws.terminate();
-    }, 10000);
+    console.log('[WS] Connection attempt with token:', token);
 
     if (!token || !ACTIVE_TOKENS.has(token)) {
         console.log('[WS] ❌ Invalid token');
@@ -73,23 +65,25 @@ wss.on('connection', (ws, req) => {
     }
 
     const exp = ACTIVE_TOKENS.get(token);
-
     if (Date.now() > exp) {
         ACTIVE_TOKENS.delete(token);
         console.log('[WS] ❌ Token expired');
-        ws.close(1008, "Expired token");
+        ws.close(1008, "Token expired");
         return;
     }
 
-    clearTimeout(timeout);
-    ACTIVE_TOKENS.delete(token);
+    // Do NOT delete token immediately; allow reconnects briefly
+    ACTIVE_TOKENS.set(token, Date.now() + 5000);
 
     const clientId = crypto.randomBytes(4).toString('hex');
-    console.log(`✅ Client ${clientId} connected`);
+    console.log(`✅ Client ${clientId} connected (Total: ${wss.clients.size})`);
 
+    // Send welcome
     ws.send(JSON.stringify({
         type: 'welcome',
-        clientId
+        clientId,
+        message: 'Connected successfully!',
+        timestamp: new Date().toISOString()
     }));
 
     ws.on('message', (msg) => {
@@ -100,27 +94,33 @@ wss.on('connection', (ws, req) => {
             return;
         }
 
+        // Ping/pong support
         if (data.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong' }));
+            ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
         }
     });
 
     ws.on('close', () => {
-        console.log(`❌ ${clientId} disconnected`);
+        console.log(`❌ Client ${clientId} disconnected`);
     });
 });
 
-// ================= START =================
-server.listen(PORT, () => {
-    console.log(`🌐 Running on port ${PORT}`);
-});
-
-// ================= CLEANUP =================
+// ==================== CLEANUP EXPIRED TOKENS ====================
 setInterval(() => {
     const now = Date.now();
+    let cleaned = 0;
     for (const [token, exp] of ACTIVE_TOKENS.entries()) {
         if (now > exp) {
             ACTIVE_TOKENS.delete(token);
+            cleaned++;
         }
     }
+    if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} expired tokens`);
 }, 30000);
+
+// ==================== START SERVER ====================
+server.listen(PORT, () => {
+    console.log(`🌐 Server running on port ${PORT}`);
+    console.log(`   HTTP: http://localhost:${PORT}/gettoken`);
+    console.log(`   WS: ws://localhost:${PORT}?token=YOUR_TOKEN_HERE`);
+});
