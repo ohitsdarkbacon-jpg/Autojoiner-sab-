@@ -1,20 +1,29 @@
 // ─── IMPORTS ───────────────────────────────
+const fs = require('fs');
+const https = require('https');
 const WebSocket = require('ws');
 const crypto = require('crypto');
+const express = require('express');
 
 // ─── CONFIG ────────────────────────────────
 const PORT = process.env.PORT || 8080;
-const USER_KEY = process.env.USER_KEY || "secret123"; // change in env
+const TOKEN_PORT = 3000; // HTTP endpoint for token fetch
+const USER_KEY = process.env.USER_KEY || "secret123";
+
+// ─── TLS CERTIFICATES ──────────────────────
+// Replace with your real certs in production
+const serverOptions = {
+    key: fs.readFileSync('server.key'),   // your TLS private key
+    cert: fs.readFileSync('server.crt')   // your TLS certificate
+};
 
 // ─── TOKEN SYSTEM ──────────────────────────
 const tokens = new Map(); // token -> expiry timestamp
 
 function generateToken() {
     const token = crypto.randomBytes(16).toString('hex');
-    const expires = Date.now() + 60_000; // 60s
+    const expires = Date.now() + 60_000; // 60 seconds
     tokens.set(token, expires);
-
-    // auto-delete
     setTimeout(() => tokens.delete(token), 60_000);
     return token;
 }
@@ -27,8 +36,7 @@ function consumeToken(token) {
     return true;
 }
 
-// ─── SIMPLE HTTP TOKEN FETCH ──────────────
-const express = require('express');
+// ─── EXPRESS TOKEN SERVER ──────────────────
 const app = express();
 
 app.get('/get_token', (req, res) => {
@@ -36,15 +44,18 @@ app.get('/get_token', (req, res) => {
     res.json({ token, expiresIn: 60 });
 });
 
-app.listen(3000, () => console.log('HTTP token endpoint running on port 3000'));
+app.listen(TOKEN_PORT, () => console.log(`HTTP token endpoint running on port ${TOKEN_PORT}`));
+
+// ─── HTTPS SERVER FOR WSS ─────────────────
+const httpsServer = https.createServer(serverOptions);
+httpsServer.listen(PORT, () => console.log(`WSS server running on port ${PORT}`));
 
 // ─── WEBSOCKET SERVER ─────────────────────
-const wss = new WebSocket.Server({ port: PORT });
-console.log('WebSocket server started on port', PORT);
+const wss = new WebSocket.Server({ server: httpsServer });
 
 wss.on('connection', (ws, req) => {
     try {
-        const url = new URL(req.url, `http://${req.headers.host}`);
+        const url = new URL(req.url, `https://${req.headers.host}`);
         const token = url.searchParams.get('token');
 
         if (!token || !consumeToken(token)) {
@@ -54,15 +65,15 @@ wss.on('connection', (ws, req) => {
         }
 
         const clientId = crypto.randomBytes(4).toString('hex');
-        console.log(`✅ Client ${clientId} connected`);
+        console.log(`✅ Client ${clientId} connected via WSS`);
 
         ws.send(JSON.stringify({ type: 'welcome', clientId }));
 
         ws.on('message', (msg) => {
             console.log('Received:', msg.toString());
 
-            // broadcast
-            wss.clients.forEach((client) => {
+            // Broadcast to all connected clients
+            wss.clients.forEach(client => {
                 if (client.readyState === WebSocket.OPEN) {
                     client.send(msg);
                 }
