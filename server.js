@@ -1,96 +1,72 @@
-// ─── IMPORTS ───────────────────────────────────
+// ─── IMPORTS ───────────────────────────────
 const WebSocket = require('ws');
-const express = require('express');
-const http = require('http');
 const crypto = require('crypto');
 
-// ─── CONFIG ────────────────────────────────────
+// ─── CONFIG ────────────────────────────────
 const PORT = process.env.PORT || 8080;
-const USER_KEY = process.env.USER_KEY;
+const USER_KEY = process.env.USER_KEY || "secret123"; // change in env
 
-if (!USER_KEY) {
-    console.error("❌ ERROR: USER_KEY not set!");
-    process.exit(1);
+// ─── TOKEN SYSTEM ──────────────────────────
+const tokens = new Map(); // token -> expiry timestamp
+
+function generateToken() {
+    const token = crypto.randomBytes(16).toString('hex');
+    const expires = Date.now() + 60_000; // 60s
+    tokens.set(token, expires);
+
+    // auto-delete
+    setTimeout(() => tokens.delete(token), 60_000);
+    return token;
 }
 
-// ─── STATE ─────────────────────────────────────
-const challenges = new Map();
-
-const app = express();
-app.use(express.json());
-
-// ─── CHALLENGE ENDPOINT ────────────────────────
-app.get('/challenge', (req, res) => {
-    const challenge = crypto.randomBytes(16).toString('hex');
-
-    challenges.set(challenge, Date.now());
-
-    // expires in 30s
-    setTimeout(() => {
-        challenges.delete(challenge);
-    }, 30000);
-
-    res.json({ challenge });
-});
-
-// ─── HEALTH ────────────────────────────────────
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'running',
-        activeChallenges: challenges.size,
-        clients: wss.clients.size,
-        time: new Date().toISOString()
-    });
-});
-
-// ─── SERVER ────────────────────────────────────
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// ─── VERIFY FUNCTION ───────────────────────────
-function verifyClient(challenge, sig) {
-    if (!challenge || !sig) return false;
-    if (!challenges.has(challenge)) return false;
-
-    const expected = crypto
-        .createHash('sha256')
-        .update(challenge + USER_KEY)
-        .digest('hex');
-
-    if (expected !== sig) return false;
-
-    challenges.delete(challenge); // one-time use
+function consumeToken(token) {
+    const expiry = tokens.get(token);
+    if (!expiry) return false;
+    if (Date.now() > expiry) { tokens.delete(token); return false; }
+    tokens.delete(token); // single-use
     return true;
 }
 
-// ─── WS CONNECTION ─────────────────────────────
+// ─── SIMPLE HTTP TOKEN FETCH ──────────────
+const express = require('express');
+const app = express();
+
+app.get('/get_token', (req, res) => {
+    const token = generateToken();
+    res.json({ token, expiresIn: 60 });
+});
+
+app.listen(3000, () => console.log('HTTP token endpoint running on port 3000'));
+
+// ─── WEBSOCKET SERVER ─────────────────────
+const wss = new WebSocket.Server({ port: PORT });
+console.log('WebSocket server started on port', PORT);
+
 wss.on('connection', (ws, req) => {
     try {
         const url = new URL(req.url, `http://${req.headers.host}`);
-        const challenge = url.searchParams.get('challenge');
-        const sig = url.searchParams.get('sig');
+        const token = url.searchParams.get('token');
 
-        if (!verifyClient(challenge, sig)) {
-            console.log("❌ Unauthorized WS attempt");
-            ws.close(4001, "Unauthorized");
+        if (!token || !consumeToken(token)) {
+            ws.send(JSON.stringify({ type: 'expired' }));
+            ws.close(4001, 'Unauthorized');
             return;
         }
 
         const clientId = crypto.randomBytes(4).toString('hex');
         console.log(`✅ Client ${clientId} connected`);
 
-        ws.send(JSON.stringify({
-            type: "welcome",
-            clientId
-        }));
+        ws.send(JSON.stringify({ type: 'welcome', clientId }));
 
         ws.on('message', (msg) => {
-            try {
-                const data = JSON.parse(msg.toString());
-                console.log("📩 Data:", data);
-            } catch {
-                console.log("⚠️ Invalid JSON");
-            }
+            console.log('Received:', msg.toString());
+
+            // broadcast
+            wss.clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(msg);
+                }
+            });
         });
 
         ws.on('close', () => {
@@ -98,11 +74,6 @@ wss.on('connection', (ws, req) => {
         });
 
     } catch (err) {
-        console.log("❌ WS error:", err.message);
+        console.log('❌ WS error:', err.message);
     }
-});
-
-// ─── START ─────────────────────────────────────
-server.listen(PORT, () => {
-    console.log(`🌐 Running on port ${PORT}`);
 });
